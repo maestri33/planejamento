@@ -56,10 +56,12 @@ finance/
 │   ├── update_payment.py
 │   ├── process_bonus.py
 │   ├── cash_register_closing.py
-│   └── process_payment.py
+│   ├── process_payment.py
+│   ├── list_all_commissions.py # chamado pelo staff
+│   ├── list_all_payments.py    # chamado pelo staff
+│   └── asaas_pix_setup.py      # chamado pelo candidate (status 20)
 ├── services/
-│   ├── __init__.py
-│   └── asaas_pix_setup.py
+│   └── __init__.py             # vazio — toda lógica externa está em tools/ ou core.asaas
 ├── tasks/
 │   ├── __init__.py
 │   └── friday_closing.py    # 2 tasks encadeadas: bonus → closing
@@ -480,9 +482,21 @@ def list_all_payments(profile_external_id: str | None = None) -> list[Payment]:
 
 ---
 
-## 8.3 Services
 
-### `finance/services/asaas_pix_setup.py`
+
+> [!info] Usado por [[11-candidate]]
+> `setup_pix_key_for_profile` é chamado quando o candidate atinge status 20 (cadastro PIX automático). Também pode ser chamado manualmente por staff para retentativa.
+
+---
+
+### `finance/tools/asaas_pix_setup.py`
+
+Chamado por `[[11-candidate|candidate/services/asaas_setup.py]]` quando candidate avança para status 20.
+
+> [!info] Por que tools/ e não services/?
+> `setup_pix_key_for_profile` não toca em nenhum model do finance — é um wrapper puro sobre
+> `[[03-core|core.asaas.service.ensure_pix_key]]`. Como não há acesso a DB do finance, fica em
+> `tools/` (público) para ser chamado por outros apps.
 
 ```python
 from core.asaas import service as asaas_service
@@ -501,11 +515,6 @@ def setup_pix_key_for_profile(profile) -> dict:
         key_type="CPF",
     )
 ```
-
-> [!info] Usado por [[11-candidate]]
-> `setup_pix_key_for_profile` é chamado quando o candidate atinge status 20 (cadastro PIX automático). Também pode ser chamado manualmente por staff para retentativa.
-
----
 
 ## 8.4 Tasks (Celery)
 

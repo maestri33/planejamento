@@ -1247,9 +1247,9 @@ def can\_advance\_from(candidate) \-\> bool:
 
 ### `candidate/services/asaas_setup.py`
 
-Wrapper sobre `[[08-finance|finance.services.asaas_pix_setup]]` (que já chama `[[03-core|core.asaas.service.ensure_pix_key]]`, que é idempotente — verifica antes se já tem cadastro).
+Wrapper sobre `[[08-finance|finance.tools.asaas_pix_setup]]` (que já chama `[[03-core|core.asaas.service.ensure_pix_key]]`, que é idempotente — verifica antes se já tem cadastro).
 
-from finance.services.asaas\_pix\_setup import setup\_pix\_key\_for\_profile
+from finance.tools.asaas_pix_setup import setup_pix_key_for_profile
 
 def register\_pix\_key\_for\_candidate(candidate) \-\> dict:
 
