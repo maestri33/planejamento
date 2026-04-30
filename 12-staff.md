@@ -57,6 +57,12 @@ staff/
 ├── middleware/
 │   ├── __init__.py
 │   └── audit.py                 # ApiLog + CommandLog + thread-local request.user
+├── notify/
+│   ├── asaas_pix_setup_failed.md
+│   ├── payment_processing_failed.md
+│   ├── friday_closing_error.md
+│   ├── webhook_validation_failed.md
+│   └── weekly_report.md
 └── apps.py
 
 ---
@@ -612,6 +618,102 @@ def log_command(user, command: str, args: str = ""):
 | `DATABASE_URL` | Persistência dos models staff |
 
 Além disso, o app staff **expõe edição** de todas as variáveis de negócio listadas em [[01-config-e-env#Negócio (editáveis via staff em runtime)]].
+
+---
+
+## 12.6 Notify — alertas operacionais
+
+> [!info] Notificações do staff
+> Diferente dos outros apps (que notificam o usuário sobre seu progresso), as notificações do staff
+> são **alertas operacionais**: falhas de sistema, relatórios periódicos e eventos que exigem atenção
+> da administração. Quem dispara essas notificações são os `services/` e `signals/` dos apps de origem
+> — o staff só define os templates.
+
+### `staff/notify/asaas_pix_setup_failed.md`
+
+Disparado por `candidate/services/asaas_setup.py` quando o cadastro PIX falha no status 20.
+O candidate fica travado nesse status até retentativa manual.
+
+```
+--tts
+⚠️ FALHA: Cadastro PIX — candidate {{ candidate_external_id }}
+
+Não foi possível cadastrar a chave PIX de {{ candidate_name }} (CPF: {{ candidate_cpf }}) no Asaas.
+Erro: {{ error_message }}
+
+O candidate permanece no status 20 aguardando retentativa.
+Acesse: {{ admin_url }}
+```
+
+### `staff/notify/payment_processing_failed.md`
+
+Disparado por `finance/signals/post_save_payment.py` quando `process_payment` falha.
+
+```
+⚠️ FALHA: Pagamento — Payment {{ payment_id }}
+
+Não foi possível processar o pagamento de R$ {{ valor }} para {{ profile_name }} ({{ profile_external_id }}).
+Commissions: {{ commissions }}
+
+Erro: {{ error_message }}
+O payment permanece com status "failed" até retentativa.
+```
+
+### `staff/notify/friday_closing_error.md`
+
+Disparado por `finance/tasks/friday_closing.py` quando bonus ou closing encontram erro.
+
+```
+⚠️ FALHA: Friday Closing — {{ date }}
+
+O fechamento semanal encontrou erros:
+
+{% if bonus_error %}
+Bonus: {{ bonus_error }}
+{% endif %}
+
+{% if closing_error %}
+Closing: {{ closing_error }}
+{% endif %}
+
+O fechamento parcial foi executado para os profiles sem erro.
+Os profiles com erro precisam de intervenção manual.
+```
+
+### `staff/notify/webhook_validation_failed.md`
+
+Disparado pelos endpoints de webhook (`lead/webhook/infinitepay`, `finance/webhook/asaas`) quando a validação de assinatura/origem falha.
+
+```
+⚠️ Webhook inválido recebido — {{ source }}
+
+Um webhook do {{ source }} foi recebido mas a validação falhou.
+IP de origem: {{ remote_ip }}
+Timestamp: {{ timestamp }}
+Motivo: {{ reason }}
+
+Payload (truncado): {{ payload_preview }}
+
+Possível tentativa de fraude ou configuração incorreta do webhook no {{ source }}.
+Verifique a assinatura/configuração no painel do {{ source }}.
+```
+
+### `staff/notify/weekly_report.md`
+
+Relatório semanal automático — disparado pelo `friday_closing` ao final do processamento.
+
+```
+📊 Relatório Semanal — {{ week_start }} a {{ week_end }}
+
+**Leads:** {{ new_leads }} novos | {{ leads_paid }} pagaram
+**Matrículas:** {{ new_students }} novos alunos
+**Conclusões:** {{ graduations }} concluíram
+**Comissões:** R$ {{ total_commissions }} em {{ total_payments }} pagamentos
+**Promoters ativos:** {{ active_promoters }}
+**Meta batida:** {{ bonus_recipients }} promoters ({{ total_bonus }} em bonus)
+
+Resumo completo: {{ admin_url }}
+```
 
 ---
 

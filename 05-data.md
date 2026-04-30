@@ -65,7 +65,7 @@ data/
 │   ├── __init__.py
 │   ├── post_save_profile.py
 │   └── post_save_address.py
-├── notify/                  # vazio inicialmente — pode ter ex: profile_complete.md
+├── notify/                  # intencionalmente vazio — data não dispara notificações (só mudanças de estado)
 └── apps.py
 ```
 
