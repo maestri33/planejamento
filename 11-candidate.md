@@ -73,21 +73,19 @@ candidate/
 
 │   ├── public.py            \# check, register, register\_veteran
 
-│   ├── authenticated.py     \# status, update (role=candidate)
-
-│   └── by\_role/
-
-│       ├── hub.py           \# list candidates do hub, aprovar/rejeitar
-
-│       └── staff.py         \# list todos, aprovar/rejeitar
+│   └── authenticated.py     \# status, update (role=candidate)
 
 ├── tools/
 
 │   ├── \_\_init\_\_.py
 
+│   ├── list\_by\_hub.py       \# Candidate.objects.filter(hub=hub), opcional filtro status
+
+│   ├── list\_all.py          \# Candidate.objects.all() com filtro opcional
+
 │   ├── update\_status.py
 
-│   ├── approve.py           \# candidate → promoter
+│   ├── approve.py           \# candidate → promoter (Chamado por hub e staff via seus próprios endpoints)
 
 │   ├── reject.py
 
@@ -749,101 +747,45 @@ def \_build\_status\_response(candidate) \-\> StatusOut:
 
     return StatusOut(status=candidate.status, message="Status desconhecido.")
 
-### `candidate/api/by_role/hub.py`
+## 11.4 Tools
 
-Coordenador aprova ou rejeita candidates do **próprio hub**.
+> [!info] Consumido por
+> - [[09-hub]] — endpoints de coordinator chamam estas tools
+> - [[12-staff]] — endpoints de staff chamam estas tools
 
-from ninja import Router
+### `candidate/tools/list_by_hub.py`
 
-from core.auth\_helpers.role\_required import require\_role
+Candidate.objects.filter(hub=hub), com filtro opcional por status.
 
 from candidate.models import Candidate
 
-from candidate.tools.approve import approve\_candidate
-
-from candidate.tools.reject import reject\_candidate
-
-from .schemas import ApprovalIn, CandidateListOut
-
-router \= Router(tags=\["candidate-hub"\])
-
-@router.get("/", response=list\[CandidateListOut\], auth=JWTAuth())
-
-def list\_my\_hub\_candidates(request, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    coordinator\_profile \= request.user.profile
-
-    hub \= coordinator\_profile.coordinated\_hub
-
-    return \[\_serialize(c) for c in Candidate.objects.filter(hub=hub)\]
-
-@router.get("/{status}", response=list\[CandidateListOut\], auth=JWTAuth())
-
-def list\_my\_hub\_candidates\_by\_status(request, status: int, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    coordinator\_profile \= request.user.profile
-
-    hub \= coordinator\_profile.coordinated\_hub
-
-    return \[\_serialize(c) for c in Candidate.objects.filter(hub=hub, status=status)\]
-
-@router.get("/{external\_id}", response=CandidateListOut, auth=JWTAuth())
-
-def get\_candidate\_detail(request, external\_id: str, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    coordinator\_profile \= request.user.profile
-
-    hub \= coordinator\_profile.coordinated\_hub
-
-    return \_serialize(Candidate.objects.get(hub=hub, profile\_\_external\_id=external\_id))
-
-@router.post("/{external\_id}/approval", auth=JWTAuth())
-
-def approve\_or\_reject(request, external\_id: str, payload: ApprovalIn, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
+def list\_by\_hub(hub, status: int | None \= None) -> list[Candidate]:
     """
-
-    Aprova ou rejeita candidate.
-
-    Status 30 → 100 (aprovado) ou 30 → 999 (rejeitado, terminal).
-
-    Candidate rejeitado NÃO vira promoter, NÃO recebe comissão e NÃO pode
-
-    voltar a tentar. Status 999 é definitivo.
-
+    Lista candidates de um hub específico.
+    Opcionalmente filtra por status.
     """
+    qs \= Candidate.objects.filter(hub=hub)
+    if status is not None:
+        qs \= qs.filter(status=status)
+    return list(qs)
 
-    coordinator\_profile \= request.user.profile
+### `candidate/tools/list_all.py`
 
-    candidate \= Candidate.objects.get(
+Candidate.objects.all() com filtro opcional.
 
-        hub=coordinator\_profile.coordinated\_hub,
+from candidate.models import Candidate
 
-        profile\_\_external\_id=external\_id,
-
-    )
-
-    if candidate.status \!= Candidate.STATUS\_AWAITING\_APPROVAL:
-
-        raise HttpError(400, "Candidate não está aguardando aprovação.")
-
-    if payload.approve:
-
-        approve\_candidate(candidate, approver\_profile=coordinator\_profile)
-
-    else:
-
-        reject\_candidate(candidate, approver\_profile=coordinator\_profile, reason=payload.rejection\_reason or "")
-
-    return {"ok": True, "new\_status": candidate.status}
-
-### `candidate/api/by_role/staff.py`
-
-Mesma lógica, sem filtro de hub (vê todos), pode aprovar/rejeitar qualquer um.
-
----
-
-## 11.4 Tools
+def list\_all(status: int | None \= None, hub=None) -> list[Candidate]:
+    """
+    Lista todos os candidates (uso staff).
+    Filtros opcionais: status e/ou hub.
+    """
+    qs \= Candidate.objects.all()
+    if status is not None:
+        qs \= qs.filter(status=status)
+    if hub is not None:
+        qs \= qs.filter(hub=hub)
+    return list(qs)
 
 ### `candidate/tools/start_from_veteran.py`
 
@@ -1113,7 +1055,7 @@ def \_notify\_awaiting\_approval(candidate):
 
 ### `candidate/tools/approve.py`
 
-Aprova candidate → vira promoter.
+Aprova candidate → vira promoter. Chamado por [[09-hub]] e [[12-staff]] via seus próprios endpoints.
 
 from django.db import transaction
 
@@ -1183,7 +1125,7 @@ def approve\_candidate(candidate: Candidate, approver\_profile) \-\> Candidate:
 
 ### `candidate/tools/reject.py`
 
-Rejeita candidate. **Status terminal**.
+Rejeita candidate. **Status terminal**. Chamado por [[09-hub]] e [[12-staff]] via seus próprios endpoints.
 
 from django.utils import timezone
 

@@ -51,13 +51,27 @@ graph TD
 | 06 | Lead | [[06-lead]] | Pré-matrícula (status 1→2→3→100) |
 | 07 | Enrollment | [[07-enrollment]] | Aluno/matrícula (15 status) |
 | 08 | Finance | [[08-finance]] | Comissões, pagamentos, friday closing |
-| 09 | Hub | *pendente* | Polo físico |
-| 10 | Promoter | *pendente* | Vendedor ativo |
+| 09 | Hub | [[09-hub]] | Polo físico |
+| 10 | Promoter | [[10-promoter]] | Vendedor ativo |
 | 11 | Candidate | [[11-candidate]] | Pipeline promoter (10 status) |
-| 12 | Staff | *pendente* | Admin, config runtime, logs |
-| 13 | Pendências | *pendente* | Decisões em aberto |
+| 12 | Staff | [[12-staff]] | Admin, config runtime, logs |
+| 13 | Pendências | [[13-pendencias-e-decisoes]] | Decisões em aberto |
 
 ---
+
+
+
+> [!tip] Arquitetura refatorada — 2026-04-29
+> **Regra fundamental:** nenhum app mexe no DB de outro app. Cada app expõe funções em `tools/`
+> que são consumidas por outros apps via seus próprios endpoints. O diretório `by_role/` foi eliminado.
+> 
+> | App dono do DB | Tools expostas | Consumidas por |
+> |:---------------|:---------------|:---------------|
+> | [[06-lead]] | `list_by_promoter`, `list_all`, `get_by_id` | [[10-promoter]], [[12-staff]] |
+> | [[07-enrollment]] | `pay_first_fee`, `schedule_second_fee`, `register_external_enrollment`, `post_exam_result`, `upload_conclusion`, `list_exams`, `create_pendency`, `resolve_pendency`, `approve_document_analysis`, `upload_final_documents` | [[09-hub]], [[12-staff]] |
+> | [[08-finance]] | `list_all_commissions`, `list_all_payments` | [[12-staff]] |
+> | [[11-candidate]] | `list_by_hub`, `list_all`, `approve`, `reject` | [[09-hub]], [[12-staff]] |
+> | [[05-data]] | `list_profiles_by_promoter`, `list_profiles_by_hub`, `list_all_profiles` | [[10-promoter]], [[09-hub]], [[12-staff]] |
 
 ## Fluxos principais
 
@@ -141,6 +155,6 @@ graph LR
 | Enrollment | — | 🔨 Especificado | [[07-enrollment]] |
 | Finance | — | 🔨 Especificado | [[08-finance]] |
 | Candidate | — | 🔨 Especificado | [[11-candidate]] |
-| Hub | — | ❌ Pendente | — |
-| Promoter | — | ❌ Pendente | — |
-| Staff | — | ❌ Pendente | — |
+| Hub | — | ✅ Especificado | [[09-hub]] |
+| Promoter | — | ✅ Especificado | [[10-promoter]] |
+| Staff | — | ✅ Especificado | [[12-staff]] |

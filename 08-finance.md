@@ -43,13 +43,13 @@ finance/
 │   ├── __init__.py
 │   ├── schemas.py
 │   ├── public.py            # webhook Asaas
-│   ├── authenticated.py     # GET commissions/payments próprios (promoter, hub_coordinator)
-│   └── by_role/
-│       └── staff.py         # GET tudo + endpoints manuais (schedule_qrcode, etc)
+│   └── authenticated.py     # GET commissions/payments próprios (promoter, hub_coordinator)
 ├── tools/
 │   ├── __init__.py
 │   ├── new_commission_promotor.py
 │   ├── new_commission_hub.py
+│   ├── list_all_commissions.py
+│   ├── list_all_payments.py
 │   ├── schedule_qrcode.py
 │   ├── pay_qrcode.py
 │   ├── pay.py
@@ -443,6 +443,41 @@ def pay(payment: Payment) -> Payment:
     return process_payment(str(payment.payment_id))
 ```
 
+> [!info] Tools vs Services
+> **Tools** são funções de lógica de negócio (criar commission, fechar caixa, listar dados). **Services** são funções de integração com serviços externos (Asaas, notificações). Tools podem chamar services, mas services NUNCA devem chamar tools. Essa separação mantém a testabilidade e evita acoplamento com sistemas externos.
+
+### `finance/tools/list_all_commissions.py`
+
+```python
+from finance.models import Commission
+
+def list_all_commissions(profile_external_id: str | None = None) -> list[Commission]:
+    """
+    Retorna todas as commissions do sistema (staff).
+    Com filtro opcional por profile_external_id.
+    """
+    qs = Commission.objects.all()
+    if profile_external_id:
+        qs = qs.filter(profile__external_id=profile_external_id)
+    return list(qs)
+```
+
+### `finance/tools/list_all_payments.py`
+
+```python
+from finance.models import Payment
+
+def list_all_payments(profile_external_id: str | None = None) -> list[Payment]:
+    """
+    Retorna todos os payments do sistema (staff).
+    Com filtro opcional por profile_external_id.
+    """
+    qs = Payment.objects.all()
+    if profile_external_id:
+        qs = qs.filter(profile__external_id=profile_external_id)
+    return list(qs)
+```
+
 ---
 
 ## 8.3 Services
@@ -597,27 +632,6 @@ def list_my_payments(request, _: None = Depends(require_role("promoter", "hub_co
     return [_serialize_payment(p) for p in profile.payments.all()]
 ```
 
-### `finance/api/by_role/staff.py`
-
-```python
-@router.get("/commissions", response=list[CommissionOut], auth=JWTAuth())
-def list_all_commissions(request, profile_external_id: str = None, _: None = Depends(require_role("staff"))):
-    qs = Commission.objects.all()
-    if profile_external_id:
-        qs = qs.filter(profile__external_id=profile_external_id)
-    return [_serialize_commission(c) for c in qs]
-
-@router.get("/payments", response=list[PaymentOut], auth=JWTAuth())
-def list_all_payments(request, profile_external_id: str = None, _: None = Depends(require_role("staff"))):
-    ...
-
-@router.post("/schedule-qrcode", auth=JWTAuth())
-def manual_schedule_qrcode(request, payload: ScheduleQrcodeIn, _: None = Depends(require_role("staff"))):
-    """Staff agenda QR code manualmente (caso de uso fora dos fluxos automáticos)."""
-    from finance.tools.schedule_qrcode import schedule_qrcode
-    return schedule_qrcode(payload.qrcode, context={"coordinator_profile": request.user.profile})
-```
-
 ---
 
 ## 8.7 Notifications
@@ -680,3 +694,9 @@ Pagamento agendado com sucesso. Valor: R$ {{ valor }}. Vencimento: {{ due_date }
 - ⚠️ **Webhook do Asaas** não tem validação de assinatura — adicionar quando confirmar nos docs do Asaas.
 - ⚠️ Quando uma `Commission.paid=True`, deve haver um histórico/log? Por enquanto o `created_at`/`updated_at` do BaseModel cobre.
 - ⚠️ **Comissão de conclusion para promoter?** **Decisão atual:** apenas hub coordinator ganha na conclusão. Promoter ganha só na captação. Reverter se quiser.
+
+---
+
+## 8.10 Consumido por
+
+- [[12-staff]]

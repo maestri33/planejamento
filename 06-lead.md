@@ -33,16 +33,16 @@ lead/
 │   ├── __init__.py
 │   ├── schemas.py
 │   ├── public.py            # check, register, webhook InfinitePay
-│   ├── authenticated.py     # status, update (role=lead)
-│   └── by_role/
-│       ├── promoter.py      # list dos leads do promoter
-│       └── staff.py         # list todos
+│   └── authenticated.py     # status, update (role=lead)
 ├── tools/
 │   ├── __init__.py
 │   ├── create_checkout.py
 │   ├── get_url.py
 │   ├── update_status.py
-│   └── paid.py
+│   ├── paid.py
+│   ├── list_by_promoter.py  # filtra leads do promoter autenticado
+│   ├── list_all.py          # todos os leads (staff), filtro opcional de status
+│   └── get_by_id.py         # busca lead por external_id, opcional filtro por promoter
 ├── services/
 │   ├── __init__.py
 │   └── lead_validators.py   # checa se status pode avançar
@@ -62,6 +62,11 @@ lead/
 │   └── payment.md
 └── apps.py
 ```
+
+## Consumido por
+
+- **[[10-promoter]]** — usa `tools/list_by_promoter.py` e `tools/get_by_id.py` para listar/buscar seus leads
+- **[[12-staff]]** — usa `tools/list_all.py` e `tools/get_by_id.py` para visão global de todos os leads
 
 ---
 
@@ -324,40 +329,12 @@ def _build_status_response(lead) -> StatusOut:
     return StatusOut(status=lead.status, message="Status desconhecido.")
 ```
 
-### `lead/api/by_role/promoter.py`
-
-```python
-from ninja import Router
-from core.auth_helpers.role_required import require_role
-
-router = Router(tags=["lead-promoter"])
-
-@router.get("/", response=list[LeadListOut], auth=JWTAuth())
-def list_my_leads(request, _: None = Depends(require_role("promoter"))):
-    profile = request.user.profile
-    leads = Lead.objects.filter(promoter=profile)
-    if not leads.exists():
-        return []
-    return [_serialize(l) for l in leads]
-
-@router.get("/{status}", response=list[LeadListOut], auth=JWTAuth())
-def list_my_leads_by_status(request, status: int, _: None = Depends(require_role("promoter"))):
-    profile = request.user.profile
-    return [_serialize(l) for l in Lead.objects.filter(promoter=profile, status=status)]
-
-@router.get("/{external_id}", response=LeadListOut, auth=JWTAuth())
-def get_lead(request, external_id: str, _: None = Depends(require_role("promoter"))):
-    profile = request.user.profile
-    return _serialize(Lead.objects.get(promoter=profile, profile__external_id=external_id))
-```
-
-### `lead/api/by_role/staff.py`
-
-Replica lógica do promoter, mas sem filtro de promoter e incluindo o campo `promoter_external_id`.
-
 ---
 
 ## 6.4 Tools
+
+> [!info] Regra de design — `tools/` toca o banco
+> Os módulos em `lead/tools/` são os **únicos** que acessam diretamente o Django ORM (`.objects.filter()`, `.get()`, `.create()`, etc.) no contexto do app `lead`. Outros apps (como `[[10-promoter]]`, `[[12-staff]]`, `finance`, `enrollment`) **não devem** importar `Lead.objects` diretamente — sempre chamam as funções em `lead/tools/` para buscar ou manipular leads. Isso mantém a lógica de acesso a dados centralizada e evita acoplamento entre apps.
 
 ### `lead/tools/create_checkout.py`
 
@@ -469,6 +446,96 @@ def mark_lead_paid(external_id: str):
     lead = Lead.objects.get(profile__external_id=external_id)
     lead.paid = True
     lead.save(update_fields=["paid"])
+```
+
+### `lead/tools/list_by_promoter.py`
+
+```python
+from lead.models import Lead
+from data.models import Profile
+from typing import Optional
+
+
+def list_by_promoter(
+    promoter_profile: Profile,
+    status: Optional[int] = None,
+) -> list[Lead]:
+    """
+    Retorna todos os leads capturados por um promoter.
+    Opcionalmente filtra por status.
+    Chamado por [[10-promoter]].
+    """
+    qs = Lead.objects.filter(promoter=promoter_profile)
+    if status is not None:
+        qs = qs.filter(status=status)
+    return list(qs.order_by("-created_at"))
+
+
+def count_by_promoter(promoter_profile: Profile) -> dict:
+    """Contagem de leads por status para dashboard do promoter."""
+    from django.db.models import Count
+    counts = (
+        Lead.objects
+        .filter(promoter=promoter_profile)
+        .values("status")
+        .annotate(total=Count("id"))
+    )
+    return {c["status"]: c["total"] for c in counts}
+```
+
+### `lead/tools/list_all.py`
+
+```python
+from lead.models import Lead
+from typing import Optional
+
+
+def list_all(status: Optional[int] = None) -> list[Lead]:
+    """
+    Retorna todos os leads do sistema.
+    Opcionalmente filtra por status.
+    Chamado por [[12-staff]].
+    """
+    qs = Lead.objects.all()
+    if status is not None:
+        qs = qs.filter(status=status)
+    return list(qs.order_by("-created_at"))
+
+
+def count_all() -> dict:
+    """Contagem total de leads por status para dashboard do staff."""
+    from django.db.models import Count
+    counts = (
+        Lead.objects
+        .values("status")
+        .annotate(total=Count("id"))
+    )
+    return {c["status"]: c["total"] for c in counts}
+```
+
+### `lead/tools/get_by_id.py`
+
+```python
+from lead.models import Lead
+from data.models import Profile
+from typing import Optional
+from django.shortcuts import get_object_or_404
+
+
+def get_by_id(
+    external_id: str,
+    promoter_profile: Optional[Profile] = None,
+) -> Lead:
+    """
+    Busca um lead pelo external_id do Profile.
+    Se promoter_profile for informado, garante que o lead pertence a ele
+    (lança 404 se não for dele).
+    Chamado por [[10-promoter]] e [[12-staff]].
+    """
+    filters = {"profile__external_id": external_id}
+    if promoter_profile is not None:
+        filters["promoter"] = promoter_profile
+    return get_object_or_404(Lead, **filters)
 ```
 
 ---

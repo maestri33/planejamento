@@ -150,6 +150,14 @@ enrollment/
 
 └── apps.py
 
+> [!info] Consumido por
+> - **[[09-hub]]** — pay fees, external enrollment, exam result, conclusion, list exams
+> - **[[12-staff]]** — pendencies, document analysis, final documents
+>
+> O app enrollment EXPÕE funções em `tools/` para que hub e staff consumam via seus próprios endpoints.
+> Nenhum app externo acessa diretamente os models Student, Exam, Pendency, EnrollmentFee ou Conclusion.
+
+
 ---
 
 ## 7.1 Models
@@ -662,6 +670,253 @@ def update\_status(student: Student) \-\> int:
 
 ---
 
+
+
+### `enrollment/tools/pay_first_fee.py`
+
+Chamado por `[[09-hub|hub]]` — coordenador paga a primeira taxa externa.
+
+```python
+from django.db import transaction
+from finance.tools.pay_qrcode import pay_qrcode
+from enrollment.models import Student, EnrollmentFee
+
+@transaction.atomic
+def pay_first_fee(student_external_id: str, qrcode: str):
+    """
+    Registra QR code e efetua pagamento da first_part_fee.
+    Verifica status=4 (AWAITING_HUB_EXTERNAL).
+    """
+    student = Student.objects.get(profile__external_id=student_external_id)
+    if student.status != Student.STATUS_AWAITING_HUB_EXTERNAL:
+        raise ValueError("Status do aluno não permite pagar fee.")
+    
+    fee = student.fees.get(kind="first_part")
+    fee.qrcode = qrcode
+    payment = pay_qrcode(qrcode=qrcode, context={"enrollment_fee_id": fee.id})
+    fee.payment = payment
+    fee.save()
+    return {"ok": True}
+```
+
+### `enrollment/tools/schedule_second_fee.py`
+
+Chamado por `[[09-hub|hub]]` — agenda pagamento da segunda taxa.
+
+```python
+from finance.tools.schedule_qrcode import schedule_qrcode
+
+def schedule_second_fee(student_external_id: str, qrcode: str):
+    student = Student.objects.get(profile__external_id=student_external_id)
+    fee = student.fees.get(kind="second_part")
+    fee.qrcode = qrcode
+    payment = schedule_qrcode(qrcode=qrcode, context={"enrollment_fee_id": fee.id})
+    fee.payment = payment
+    fee.save()
+    return {"ok": True}
+```
+
+### `enrollment/tools/register_external_enrollment.py`
+
+Chamado por `[[09-hub|hub]]` — registra matrícula externa concluída.
+
+```python
+@transaction.atomic
+def register_external_enrollment(
+    student_external_id: str,
+    username: str,
+    password: str,
+) -> Student:
+    """
+    Verifica ambas fees pagas, salva credenciais, status 4 → 10.
+    Notifica aluno com credenciais da plataforma externa.
+    """
+    student = Student.objects.get(profile__external_id=student_external_id)
+    
+    if not all(f.paid for f in student.fees.all()):
+        raise ValueError("Ambas as taxas precisam estar pagas.")
+    
+    student.external_username = username
+    student.external_password = password  # ⚠️ texto cru
+    student.status = Student.STATUS_RG
+    student.save()
+    
+    notify_service.send(
+        external_id=str(student.profile.external_id),
+        template_path="enrollment/notify/external_enrollment.md",
+        context={
+            "first_name": student.profile.user.first_name,
+            "username": username,
+            "password": password,
+            "external_platform_url": config.EXTERNAL_PLATFORM_URL,
+        },
+    )
+    return student
+```
+
+### `enrollment/tools/post_exam_result.py`
+
+Chamado por `[[09-hub|hub]]` — registra resultado da prova.
+
+```python
+def post_exam_result(
+    student_external_id: str,
+    attended: bool,
+    approved: bool | None = None,
+    pdf_file=None,
+) -> dict:
+    """
+    attended=False → status volta pra 20, notify missed
+    attended=True, approved=False → status volta pra 20, notify failed (com pdf)
+    attended=True, approved=True → status 21 → 30, notify passed
+    """
+    student = Student.objects.get(profile__external_id=student_external_id)
+    exam = student.exams.latest("created_at")
+    exam.attended = attended
+    exam.approved = approved
+    if pdf_file:
+        exam.pdf = pdf_file
+    exam.save()
+    
+    if not attended:
+        student.status = Student.STATUS_SCHEDULE_EXAM
+        student.save()
+        notify_service.send(..., template_path="enrollment/notify/missed_the_test.md")
+        return {"ok": True, "new_status": student.status}
+    
+    if approved is False:
+        student.status = Student.STATUS_SCHEDULE_EXAM
+        student.save()
+        notify_service.send(..., template_path="enrollment/notify/failed_the_test.md")
+        return {"ok": True, "new_status": student.status}
+    
+    student.status = Student.STATUS_ANALYSIS
+    student.save()
+    notify_service.send(..., template_path="enrollment/notify/passed_the_test.md")
+    return {"ok": True, "new_status": student.status}
+```
+
+### `enrollment/tools/upload_conclusion.py`
+
+Chamado por `[[09-hub|hub]]` — recebe selfie + foto com coordenador.
+
+```python
+def upload_conclusion(
+    student_external_id: str,
+    self_certified,
+    photo_with_hub_coordinator,
+) -> Conclusion:
+    """
+    Salva os 2 arquivos, marca completed=True, status 33 → 100.
+    O signal post_save Student cuida de comissão + convite veteran.
+    """
+    student = Student.objects.get(profile__external_id=student_external_id)
+    conclusion, _ = Conclusion.objects.get_or_create(student=student)
+    conclusion.self_certified = self_certified
+    conclusion.photo_with_hub_coordinator = photo_with_hub_coordinator
+    conclusion.completed = True
+    conclusion.save()
+    
+    student.status = Student.STATUS_DONE
+    student.save()
+    return conclusion
+```
+
+### `enrollment/tools/list_exams.py`
+
+Chamado por `[[09-hub|hub]]` e `[[12-staff|staff]]`.
+
+```python
+def list_exams(hub, date=None, time=None, scheduled_only=False):
+    """Lista exames de um hub com filtros opcionais."""
+    qs = Exam.objects.filter(student__hub=hub)
+    if scheduled_only:
+        qs = qs.filter(attended__isnull=True)
+    if date:
+        qs = qs.filter(scheduled_date=date)
+    if time:
+        qs = qs.filter(scheduled_time=time)
+    return qs
+```
+
+### `enrollment/tools/create_pendency.py`
+
+Chamado por `[[12-staff|staff]]`.
+
+```python
+def create_pendency(student_external_id: str, content: str, media=None) -> Pendency:
+    """Cria pendência. Se status=30, avança pra 31."""
+    student = Student.objects.get(profile__external_id=student_external_id)
+    pendency = Pendency.objects.create(student=student, content=content, media=media)
+    if student.status == Student.STATUS_ANALYSIS:
+        student.status = Student.STATUS_PENDENCY
+        student.save()
+    notify_service.send(
+        external_id=str(student.profile.external_id),
+        template_path="enrollment/notify/pending.md",
+        context={"first_name": student.profile.user.first_name, "content": content},
+    )
+    return pendency
+```
+
+### `enrollment/tools/resolve_pendency.py`
+
+Chamado por `[[09-hub|hub]]` e `[[12-staff|staff]]`.
+
+```python
+def resolve_pendency(pendency_id: int) -> dict:
+    """Marca pendência como resolvida. Se foi a última, volta status pra 30."""
+    p = Pendency.objects.get(id=pendency_id)
+    p.resolved = True
+    p.save()
+    student = p.student
+    if student.status == Student.STATUS_PENDENCY and not student.pendencies.filter(resolved=False).exists():
+        student.status = Student.STATUS_ANALYSIS
+        student.save()
+    return {"ok": True}
+```
+
+### `enrollment/tools/approve_document_analysis.py`
+
+Chamado por `[[12-staff|staff]]`.
+
+```python
+def approve_document_analysis(student_external_id: str) -> dict:
+    """Status 30 → 32. Aguardando secretaria."""
+    student = Student.objects.get(profile__external_id=student_external_id)
+    student.status = Student.STATUS_AWAITING_SECRETARIA
+    student.save()
+    notify_service.send(
+        external_id=str(student.profile.external_id),
+        template_path="enrollment/notify/document_analysis_approved.md",
+        context={"first_name": student.profile.user.first_name},
+    )
+    return {"ok": True}
+```
+
+### `enrollment/tools/upload_final_documents.py`
+
+Chamado por `[[12-staff|staff]]`.
+
+```python
+def upload_final_documents(
+    student_external_id: str,
+    historic,
+    certificate,
+) -> StudentDocument:
+    """Staff sobe histórico + certificado. Status 32 → 33. Notifica aluno."""
+    student = Student.objects.get(profile__external_id=student_external_id)
+    doc, _ = StudentDocument.objects.get_or_create(student=student)
+    doc.historic = historic
+    doc.certificate = certificate
+    doc.save()
+    student.status = Student.STATUS_AVAILABLE_AT_HUB
+    student.save()
+    # 3 notifies: documentation_available, historic, certificate
+    ...
+    return doc
+```
+
 ## 7.3 Services (privado)
 
 ### `enrollment/services/student_validators.py`
@@ -964,388 +1219,6 @@ Retorna a mensagem/instrução conforme status. Resumo do que cada status devolv
 | 32 | "Aguardando documentação da secretaria" | (sem ação) |
 | 33 | "Documentação disponível no polo" | extra: {hub\_address, historic\_url, certificate\_url} |
 | 100 | "Concluído" | extra: student\_trajectory() |
-
-### `enrollment/api/by_role/hub.py`
-
-Endpoints exclusivos do coordenador do hub:
-
-@router.post("/{external\_id}/pay-first-fee", auth=JWTAuth())
-
-def pay\_first\_fee(request, external\_id: str, payload: dict, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    """
-
-    Hub paga first\_part\_fee. Verifica status=4. Salva qrcode, chama finance.tools.pay\_qrcode,
-
-    relaciona o Payment criado à EnrollmentFee.
-
-    """
-
-    student \= Student.objects.get(profile\_\_external\_id=external\_id)
-
-    if student.status \!= Student.STATUS\_AWAITING\_HUB\_EXTERNAL:
-
-        raise HttpError(400, "Status do aluno não permite pagar fee.")
-
-    from finance.tools.pay\_qrcode import pay\_qrcode
-
-    fee \= student.fees.get(kind="first\_part")
-
-    fee.qrcode \= payload\["qrcode"\]
-
-    payment \= pay\_qrcode(qrcode=payload\["qrcode"\], context={"enrollment\_fee\_id": fee.id})
-
-    fee.payment \= payment
-
-    fee.save()
-
-    return {"ok": True}
-
-@router.post("/{external\_id}/schedule-second-fee", auth=JWTAuth())
-
-def schedule\_second\_fee(request, external\_id: str, payload: dict, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    """Mesma lógica usando finance.tools.schedule\_qrcode."""
-
-    ...
-
-@router.post("/{external\_id}/external-enrollment", auth=JWTAuth())
-
-def external\_enrollment(request, external\_id: str, payload: ExternalEnrollmentIn, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    """
-
-    Hub registra que matrícula externa foi feita.
-
-    \- Verifica que ambas as fees estão pagas
-
-    \- Salva username \+ password
-
-    \- Atualiza status 4 → 10
-
-    \- Notifica aluno (external\_enrollment.md com credenciais)
-
-    """
-
-    student \= Student.objects.get(profile\_\_external\_id=external\_id)
-
-    if not all(f.paid for f in student.fees.all()):
-
-        raise HttpError(400, "Ambas as taxas precisam estar pagas.")
-
-    student.external\_username \= payload.username
-
-    student.external\_password \= payload.password  \# ⚠️ ver pendência sobre criptografia
-
-    student.status \= Student.STATUS\_RG
-
-    student.save()
-
-    notify\_service.send(
-
-        external\_id=str(student.profile.external\_id),
-
-        template\_path="enrollment/notify/external\_enrollment.md",
-
-        context={
-
-            "first\_name": student.profile.user.first\_name,
-
-            "username": payload.username,
-
-            "password": payload.password,
-
-            "external\_platform\_url": config.EXTERNAL\_PLATFORM\_URL,
-
-        },
-
-    )
-
-    return {"ok": True, "new\_status": student.status}
-
-@router.post("/{external\_id}/exam-result", auth=JWTAuth())
-
-def post\_exam\_result(request, external\_id: str, payload: ExamPostIn, file: UploadedFile \= File(None), \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    """
-
-    Hub registra resultado da prova.
-
-    \- attended=False → notify missed\_the\_test, volta status para 20
-
-    \- attended=True, approved=False → notify failed\_the\_test (com pdf), volta status para 20
-
-    \- attended=True, approved=True → notify passed\_the\_test, status 21 → 30
-
-    """
-
-    student \= Student.objects.get(profile\_\_external\_id=external\_id)
-
-    exam \= student.exams.latest("created\_at")
-
-    exam.attended \= payload.attended
-
-    exam.approved \= payload.approved
-
-    if file:
-
-        exam.pdf \= file
-
-    exam.save()
-
-    if not payload.attended:
-
-        student.status \= Student.STATUS\_SCHEDULE\_EXAM
-
-        student.save()
-
-        notify\_service.send(
-
-            external\_id=str(student.profile.external\_id),
-
-            template\_path="enrollment/notify/missed\_the\_test.md",
-
-            context={"first\_name": student.profile.user.first\_name},
-
-        )
-
-        return {"ok": True, "new\_status": student.status}
-
-    if payload.approved is False:
-
-        student.status \= Student.STATUS\_SCHEDULE\_EXAM
-
-        student.save()
-
-        notify\_service.send(
-
-            external\_id=str(student.profile.external\_id),
-
-            template\_path="enrollment/notify/failed\_the\_test.md",
-
-            context={
-
-                "first\_name": student.profile.user.first\_name,
-
-                "exam\_pdf\_url": build\_external\_url(exam.pdf),
-
-            },
-
-            media\_url=build\_external\_url(exam.pdf),
-
-        )
-
-        return {"ok": True, "new\_status": student.status}
-
-    \# Aprovado
-
-    student.status \= Student.STATUS\_ANALYSIS
-
-    student.save()
-
-    notify\_service.send(
-
-        external\_id=str(student.profile.external\_id),
-
-        template\_path="enrollment/notify/passed\_the\_test.md",
-
-        context={"first\_name": student.profile.user.first\_name},
-
-    )
-
-    return {"ok": True, "new\_status": student.status}
-
-@router.patch("/{external\_id}/conclusion", auth=JWTAuth())
-
-def patch\_conclusion(request, external\_id: str, self\_certified: UploadedFile \= File(...), photo: UploadedFile \= File(...), \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    """
-
-    Recebe os 2 arquivos. Marca conclusion.completed=True. Atualiza status 33 → 100\.
-
-    Dispara signal post\_save\_student que cuida das comissões e convite.
-
-    """
-
-    ...
-
-\# Endpoints gerais para hub (sem external\_id) — listar exames
-
-@router.get("/exams", auth=JWTAuth())
-
-def list\_exams(request, date: str \= None, time: str \= None, scheduled\_only: bool \= False, \_: None \= Depends(require\_role("hub\_coordinator"))):
-
-    hub \= request.user.profile.promoter\_record.hub\_coordinated  \# hub que ele coordena
-
-    qs \= Exam.objects.filter(student\_\_hub=hub)
-
-    if scheduled\_only:
-
-        qs \= qs.filter(attended\_\_isnull=True)
-
-    if date:
-
-        qs \= qs.filter(scheduled\_date=date)
-
-    if time:
-
-        qs \= qs.filter(scheduled\_time=time)
-
-    return \[...\]
-
-### `enrollment/api/by_role/staff.py`
-
-@router.post("/{external\_id}/pendency", auth=JWTAuth())
-
-def post\_pendency(request, external\_id: str, payload: PendencyIn, file: UploadedFile \= File(None), \_: None \= Depends(require\_role("staff"))):
-
-    """Cria pendência. Status 30 → 31\. Notifica aluno."""
-
-    student \= Student.objects.get(profile\_\_external\_id=external\_id)
-
-    pendency \= Pendency.objects.create(student=student, content=payload.content, media=file)
-
-    if student.status \== Student.STATUS\_ANALYSIS:
-
-        student.status \= Student.STATUS\_PENDENCY
-
-        student.save()
-
-    notify\_service.send(
-
-        external\_id=str(student.profile.external\_id),
-
-        template\_path="enrollment/notify/pending.md",
-
-        context={"first\_name": student.profile.user.first\_name, "content": payload.content},
-
-    )
-
-    return {"ok": True}
-
-@router.get("/{external\_id}/pendencies", auth=JWTAuth())
-
-def list\_pendencies(request, external\_id: str, \_: None \= Depends(require\_role("staff", "hub\_coordinator"))):
-
-    student \= Student.objects.get(profile\_\_external\_id=external\_id)
-
-    return \[{"id": p.id, "content": p.content, "resolved": p.resolved} for p in student.pendencies.all()\]
-
-@router.patch("/{external\_id}/pendency/{pendency\_id}", auth=JWTAuth())
-
-def resolve\_pendency(request, external\_id: str, pendency\_id: int, \_: None \= Depends(require\_role("staff", "hub\_coordinator"))):
-
-    """Marca pendência como resolvida. Se foi a última, volta status para 30 (análise)."""
-
-    p \= Pendency.objects.get(id=pendency\_id, student\_\_profile\_\_external\_id=external\_id)
-
-    p.resolved \= True
-
-    p.save()
-
-    student \= p.student
-
-    if student.status \== Student.STATUS\_PENDENCY and not student.pendencies.filter(resolved=False).exists():
-
-        student.status \= Student.STATUS\_ANALYSIS
-
-        student.save()
-
-    return {"ok": True}
-
-@router.post("/{external\_id}/document-analysis-approved", auth=JWTAuth())
-
-def document\_analysis\_approved(request, external\_id: str, \_: None \= Depends(require\_role("staff"))):
-
-    """Status 30 → 32\. Solicita documentação à secretaria."""
-
-    student \= Student.objects.get(profile\_\_external\_id=external\_id)
-
-    student.status \= Student.STATUS\_AWAITING\_SECRETARIA
-
-    student.save()
-
-    notify\_service.send(
-
-        external\_id=str(student.profile.external\_id),
-
-        template\_path="enrollment/notify/document\_analysis\_approved.md",
-
-        context={"first\_name": student.profile.user.first\_name},
-
-    )
-
-    return {"ok": True}
-
-@router.patch("/{external\_id}/document", auth=JWTAuth())
-
-def patch\_document(request, external\_id: str, historic: UploadedFile \= File(...), certificate: UploadedFile \= File(...), \_: None \= Depends(require\_role("staff"))):
-
-    """
-
-    Staff sobe os 2 arquivos finais (vindos da secretaria).
-
-    Status 32 → 33\. Dispara 3 notifies.
-
-    """
-
-    student \= Student.objects.get(profile\_\_external\_id=external\_id)
-
-    doc, \_ \= StudentDocument.objects.get\_or\_create(student=student)
-
-    doc.historic \= historic
-
-    doc.certificate \= certificate
-
-    doc.save()
-
-    student.status \= Student.STATUS\_AVAILABLE\_AT\_HUB
-
-    student.save()
-
-    notify\_service.send(
-
-        external\_id=str(student.profile.external\_id),
-
-        template\_path="enrollment/notify/documentation\_available.md",
-
-        context={
-
-            "first\_name": student.profile.user.first\_name,
-
-            "hub\_address": student.hub.full\_address,
-
-        },
-
-    )
-
-    notify\_service.send(
-
-        external\_id=str(student.profile.external\_id),
-
-        template\_path="enrollment/notify/historic.md",
-
-        context={"url": build\_external\_url(doc.historic)},
-
-        media\_url=build\_external\_url(doc.historic),
-
-    )
-
-    notify\_service.send(
-
-        external\_id=str(student.profile.external\_id),
-
-        template\_path="enrollment/notify/certificate.md",
-
-        context={"url": build\_external\_url(doc.certificate)},
-
-        media\_url=build\_external\_url(doc.certificate),
-
-    )
-
-    return {"ok": True}
-
----
 
 ## 7.5 Tasks (Celery)
 

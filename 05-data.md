@@ -38,15 +38,14 @@ data/
 │   │   └── documents.py
 │   ├── public.py            # GET /cpf/<numero>
 │   ├── authenticated.py     # PATCH/GET próprio perfil
-│   └── by_role/
-│       ├── promoter.py      # list/get profiles de seus leads
-│       ├── hub.py           # list/get profiles dos alunos do hub + PATCH
-│       └── staff.py         # tudo
 ├── tools/
 │   ├── __init__.py
 │   ├── get_cpf.py           # busca CPF → external_id
 │   ├── new_profile.py       # cria Profile + cascata
-│   └── update_name.py       # split first/last name
+│   ├── update_name.py       # split first/last name
+│   ├── list_profiles_by_promoter.py  # Profile.objects.filter(lead__promoter=promoter_profile)
+│   ├── list_profiles_by_hub.py       # Profile.objects.filter(student__hub=hub)
+│   └── list_all_profiles.py          # Profile.objects.all()
 ├── services/
 │   ├── __init__.py
 │   └── document_factory.py  # cria documents conforme regras (sexo masculino → military_document)
@@ -506,40 +505,38 @@ def patch_my_email(request, payload: dict):
 # ... GET/PATCH para Address, Educational, BirthInfo, RG, etc.
 ```
 
-### `data/api/by_role/staff.py`
+### `data/tools/list_profiles_by_promoter.py`
 
 ```python
-@router.get("/profiles", response=list[ProfileOut], auth=JWTAuth())
-def list_profiles(request, _: None = Depends(require_role("staff"))):
+from data.models import Profile
+
+def list_profiles_by_promoter(promoter_profile) -> list[Profile]:
+    """Retorna profiles dos leads de um promoter."""
+    return Profile.objects.filter(lead__promoter=promoter_profile)
+```
+
+### `data/tools/list_profiles_by_hub.py`
+
+```python
+from data.models import Profile
+
+def list_profiles_by_hub(hub) -> list[Profile]:
+    """Retorna profiles dos alunos de um hub."""
+    return Profile.objects.filter(student__hub=hub)
+```
+
+### `data/tools/list_all_profiles.py`
+
+```python
+from data.models import Profile
+
+def list_all_profiles() -> list[Profile]:
+    """Retorna todos os profiles (staff)."""
     return Profile.objects.all()
-
-@router.get("/profiles/{external_id}", response=ProfileOut, auth=JWTAuth())
-def get_profile(request, external_id: str, _: None = Depends(require_role("staff"))):
-    return Profile.objects.get(external_id=external_id)
-
-@router.patch("/profiles/{external_id}", response=ProfileOut, auth=JWTAuth())
-def patch_profile(request, external_id: str, payload: ProfilePatchIn, _: None = Depends(require_role("staff", "hub_coordinator"))):
-    ...
 ```
 
-### `data/api/by_role/promoter.py`
-
-```python
-@router.get("/profiles", response=list[ProfileOut], auth=JWTAuth())
-def list_my_leads_profiles(request, _: None = Depends(require_role("promoter"))):
-    """Retorna profiles dos leads que este promoter captou."""
-    promoter_external_id = request.user.profile.external_id
-    return Profile.objects.filter(lead__promoter__external_id=promoter_external_id)
-```
-
-### `data/api/by_role/hub.py`
-
-```python
-@router.get("/profiles", response=list[ProfileOut], auth=JWTAuth())
-def list_hub_students_profiles(request, _: None = Depends(require_role("hub_coordinator"))):
-    """Retorna profiles dos alunos do hub deste coordenador."""
-    ...
-```
+> [!info] Consumido por
+> [[10-promoter]], [[09-hub]], [[12-staff]]
 
 ---
 
